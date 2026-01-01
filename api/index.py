@@ -1,52 +1,64 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import os
 import json
+import sys
 import google.generativeai as genai
 from typing import List, Optional
 
-# --- FIX IMPORTS FOR VERCEL ---
-import sys
+# --- IMPORT ROLES FIX ---
 try:
-    # Пытаемся импортировать локально (когда запускаем python api/index.py)
-    from .roles import PROMPTS
+    from roles import PROMPTS
 except ImportError:
-    # Пытаемся импортировать в облаке (Vercel добавляет api/ в path)
     try:
-        from roles import PROMPTS
+        from .roles import PROMPTS
     except ImportError:
-        # Фоллбэк: добавляем текущую директорию в path
-        sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+        sys.path.append(os.path.dirname(os.path.abspath(file)))
         from roles import PROMPTS
-# ------------------------------
+# ------------------------
 
 app = FastAPI()
 
-# Конфигурация Gemini
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+# Читаем HTML файл в память, чтобы не возиться с путями к статике в Vercel
+try:
+    # Пытаемся найти index.html в разных местах (локально vs vercel)
+    base_path = os.path.dirname(os.path.dirname(os.path.abspath(file)))
+    public_path = os.path.join(base_path, 'public', 'index.html')
+    
+    if not os.path.exists(public_path):
+        # Fallback для Vercel структуры, если public лежит рядом с api
+        public_path = os.path.join(os.path.dirname(os.path.abspath(file)), '..', 'public', 'index.html')
 
-genai.configure(api_key=GOOGLE_API_KEY)
+    with open(public_path, 'r', encoding='utf-8') as f:
+        html_content = f.read()
+except Exception as e:
+    html_content = f"<h1>Error loading frontend: {str(e)}</h1>"
+
+# --- ГЛАВНАЯ СТРАНИЦА (FRONTEND) ---
+@app.get("/", response_class=HTMLResponse)
+async def serve_frontend():
+    return html_content
+
+# --- API ENDPOINT ---
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+if GOOGLE_API_KEY:
+    genai.configure(api_key=GOOGLE_API_KEY)
 
 class AgentRequest(BaseModel):
     agent: str
     user_input: str
     history: List[dict]
 
-class AgentResponse(BaseModel):
-    thought: str
-    content: str
-    next_agent: str
-    code_snippet: Optional[str] = None
-
 @app.post("/api/chat")
 async def chat_handler(request: AgentRequest):
     if not GOOGLE_API_KEY:
-        raise HTTPException(status_code=500, detail="GOOGLE_API_KEY not set on Vercel Environment Variables")
+        return JSONResponse(status_code=500, content={"error": "API Key not set"})
 
     if request.agent not in PROMPTS:
-        raise HTTPException(status_code=400, detail=f"Unknown agent: {request.agent}")
+        return JSONResponse(status_code=400, content={"error": f"Unknown agent: {request.agent}"})
 
-    # Используем модель
     model = genai.GenerativeModel(
         'gemini-1.5-pro-latest',
         system_instruction=PROMPTS[request.agent],
@@ -54,42 +66,26 @@ async def chat_handler(request: AgentRequest):
     )
 
     try:
-        # Формируем историю. Важно: Gemini API требует чередование user/model
-        # Если история пустая или битая, начинаем новую
-        history_payload = request.history if request.history else []
+        chat = model.start_chat(history=request.history or [])
+        msg = request.user_input if request.user_input else f"Proceed with task. Context is in history."
+        response = chat.send_message(msg)
         
-        chat = model.start_chat(history=history_payload)
-        
-        message_to_send = request.user_input if request.user_input else f"Attention {request.agent}. Proceed with your task based on context."
-
-        response = chat.send_message(message_to_send)
-        
-        # Парсинг ответа
         try:
-            response_json = json.loads(response.text)
-        except json.JSONDecodeError:
-            # Если модель вернула не чистый JSON (бывает редко)
-            response_json = {
-                "thought": "Error parsing JSON",
-                "content": response.text,
-                "next_agent": "Producer"
-            }
-        
-        # Извлечение кода
-        code_snippet = None
-        content_text = response_json.get("content", "")
-        if "```html" in content_text:
-            code_snippet = content_text.split("```html")[1].split("```")[0]
-        elif "<!DOCTYPE html>" in content_text:
-             code_snippet = content_text
+            data = json.loads(response.text)
+        except:
+            data = {"thought": "Parsing Error", "content": response.text, "next_agent": "Producer"}
 
-        return AgentResponse(
-            thought=response_json.get("thought", "Thinking..."),
-            content=response_json.get("content", ""),
-            next_agent=response_json.get("next_agent", "Producer"),
-            code_snippet=code_snippet
-        )
+        # Extract Code
+        code = None
+        if "
+            code = data["content"].split("
+html")[1].split("```")[0]
 
+        return {
+            "thought": data.get("thought"),
+            "content": data.get("content"),
+            "next_agent": data.get("next_agent", "Producer"),
+            "code_snippet": code
+        }
     except Exception as e:
-        print(f"Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return JSONResponse(status_code=500, content={"error": str(e)})
