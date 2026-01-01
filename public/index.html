@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Yandex Games Multi-Agent System</title>
+    <style>
+        :root { --bg: #0f172a; --card: #1e293b; --text: #f8fafc; --accent: #3b82f6; --success: #22c55e; }
+        body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', sans-serif; margin: 0; padding: 20px; display: flex; flex-direction: column; height: 100vh; box-sizing: border-box; }
+        .container { max-width: 1200px; margin: 0 auto; width: 100%; display: flex; flex-direction: column; gap: 20px; flex-grow: 1; }
+        
+        /* Header */
+        header { display: flex; justify-content: space-between; align-items: center; padding-bottom: 20px; border-bottom: 1px solid #334155; }
+        h1 { margin: 0; font-size: 1.5rem; }
+        .status { font-size: 0.9rem; color: #94a3b8; }
+        .badge { padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 0.8rem; }
+        .badge.working { background: var(--accent); color: white; animation: pulse 1.5s infinite; }
+        .badge.idle { background: #475569; color: #cbd5e1; }
+
+        /* Main Area */
+        .workspace { display: flex; gap: 20px; flex-grow: 1; overflow: hidden; }
+        
+        /* Logs Panel */
+        .logs { flex: 1; background: var(--card); border-radius: 12px; padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 15px; border: 1px solid #334155; }
+        .message { background: #334155; padding: 15px; border-radius: 8px; border-left: 4px solid var(--accent); }
+        .message.producer { border-color: #eab308; }
+        .message.error { border-color: #ef4444; background: #451a1a; }
+        .message-header { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 0.85rem; color: #94a3b8; }
+        .agent-name { font-weight: bold; color: var(--text); }
+        .content { white-space: pre-wrap; font-family: 'Consolas', monospace; font-size: 0.9rem; line-height: 1.5; }
+        
+        /* Artifact Panel (Preview) */
+        .artifacts { flex: 1; background: #000; border-radius: 12px; border: 1px solid #334155; display: flex; flex-direction: column; }
+        .artifacts-header { padding: 10px 20px; background: #1e293b; border-bottom: 1px solid #334155; border-radius: 12px 12px 0 0; font-weight: bold; }
+        iframe { flex-grow: 1; border: none; background: #fff; }
+
+        /* Input Area */
+        .input-area { display: flex; gap: 10px; padding-top: 10px; }
+        input[type="text"] { flex-grow: 1; padding: 15px; border-radius: 8px; border: 1px solid #475569; background: var(--card); color: var(--text); font-size: 1rem; }
+        button { padding: 0 30px; border-radius: 8px; border: none; background: var(--accent); color: white; font-weight: bold; cursor: pointer; transition: 0.2s; }
+        button:hover { background: #2563eb; }
+        button:disabled { background: #475569; cursor: not-allowed; }
+
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.6; } 100% { opacity: 1; } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Yandex Games Agency (AI Orchestrator)</h1>
+            <div id="status-badge" class="badge idle">IDLE</div>
+        </header>
+        
+        <div class="workspace">
+            <div class="logs" id="logs-container">
+                <div class="message">
+                    <div class="message-header"><span class="agent-name">System</span></div>
+                    <div class="content">Система готова. Введите идею игры, чтобы разбудить Продюсера.</div>
+                </div>
+            </div>
+            <div class="artifacts">
+                <div class="artifacts-header">Latest Build Preview (index.html)</div>
+                <iframe id="preview-frame"></iframe>
+            </div>
+        </div>
+
+        <div class="input-area">
+            <input type="text" id="user-input" placeholder="Опишите игру (например: 'Клон Flappy Bird, но вместо птицы летающая шаурма')...">
+            <button id="send-btn" onclick="startWorkflow()">Start Production</button>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = '/api/chat';
+        let conversationHistory = [];
+        let isProcessing = false;
+
+        async function startWorkflow() {
+            if (isProcessing) return;
+            
+            const inputField = document.getElementById('user-input');
+            const task = inputField.value.trim();
+            if (!task) return;
+
+            isProcessing = true;
+            updateStatus(true, "Producer is thinking...");
+            addLog("User", task);
+            inputField.value = "";
+            inputField.disabled = true;
+            document.getElementById('send-btn').disabled = true;
+
+            // Начинаем цепочку с Продюсера
+            await runAgentLoop('Producer', task);
+        }
+
+        async function runAgentLoop(currentAgent, input) {
+            try {
+                const response = await fetch(API_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        agent: currentAgent,
+                        user_input: input,
+                        history: conversationHistory
+                    })
+                });
+
+                const data = await response.json();
+                
+                if (data.error) {
+                    addLog("System Error", data.error, "error");
+                    stopWorkflow();
+                    return;
+                }
+
+                // Отображаем ответ
+                addLog(currentAgent, data.content, currentAgent.toLowerCase());
+                
+                // Сохраняем в историю
+                conversationHistory.push({
+                    role: "model",
+                    parts: [`[AGENT: ${currentAgent}] ${data.content}`]
+                });
+
+                // Если есть код, обновляем превью
+                if (data.code_snippet) {
+                    const blob = new Blob([data.code_snippet], { type: 'text/html' });
+                    document.getElementById('preview-frame').src = URL.createObjectURL(blob);
+                }
+
+                // Логика маршрутизации
+                if (data.next_agent === "FINISH" || data.next_agent === "USER") {
+                    addLog("System", "Производственный цикл завершен. Продукт готов к отправке.");
+                    stopWorkflow();
+                } else {
+                    updateStatus(true, `Handoff to ${data.next_agent}...`);
+                    // Рекурсивный вызов следующего агента
+                    // Передаем весь контекст через историю, input пустой, так как контекст уже в истории
+                    await runAgentLoop(data.next_agent, ""); 
+                }
+
+            } catch (e) {
+                console.error(e);
+                addLog("Network Error", e.message, "error");
+                stopWorkflow();
+            }
+        }
+
+        function addLog(agent, text, type="normal") {
+            const logs = document.getElementById('logs-container');
+            const msgDiv = document.createElement('div');
+            msgDiv.className = `message ${type}`;
+            msgDiv.innerHTML = `
+                <div class="message-header">
+                    <span class="agent-name">${agent}</span>
+                    <span>${new Date().toLocaleTimeString()}</span>
+                </div>
+                <div class="content">${text.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</div>
+            `;
+            logs.appendChild(msgDiv);
+            logs.scrollTop = logs.scrollHeight;
+        }
+
+        function updateStatus(active, text) {
+            const badge = document.getElementById('status-badge');
+            badge.className = active ? 'badge working' : 'badge idle';
+            badge.textContent = text || (active ? 'WORKING' : 'IDLE');
+        }
+
+        function stopWorkflow() {
+            isProcessing = false;
+            updateStatus(false);
+            document.getElementById('user-input').disabled = false;
+            document.getElementById('send-btn').disabled = false;
+        }
+    </script>
+</body>
+</html>
